@@ -1,5 +1,5 @@
 node_modules/
 dist/
 .env
-wallets.json
 *.db
+wallets.json
