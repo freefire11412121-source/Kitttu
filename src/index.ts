@@ -1,21 +1,16 @@
-import { startBot } from "./bot.js";
+import { startBot, sendNotification } from "./bot.js";
 import { startCronJobs } from "./cron.js";
 
-console.log("🚀 DAC Airdrop Bot v1.0");
-console.log(`   Chain: DAC Inception Testnet (ID 21894)`);
-console.log(`   RPC: https://rpctest.dachain.tech`);
-console.log(`   Portal: https://inception.dachain.io`);
+console.log("Viewpoints Auto Bot v1.0");
+console.log("  Survey automation for Meta Viewpoints");
+console.log("  Telegram-controlled | Auto-scheduled");
 
 const bot = startBot();
 
 startCronJobs((msg) => {
-  const chatId = process.env.CHAT_ID;
-  if (chatId) {
-    bot.telegram.sendMessage(chatId, msg).catch(() => {});
-  }
+  sendNotification(msg);
 });
 
-// Graceful shutdown
 const shutdown = () => {
   console.log("Shutting down...");
   bot.stop("SIGTERM");

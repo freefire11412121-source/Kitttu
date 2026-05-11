@@ -1,28 +1,44 @@
-# DAC Airdrop Bot
+# Viewpoints Auto Bot
 
-Automated farming bot for DAC Chain Inception Testnet — earns maximum QE points for future $DAC airdrop.
+Telegram bot that automates Meta Viewpoints survey completion using Facebook's cookie-based auth and internal GraphQL API.
 
-## Features
+## Architecture
 
-- **Multi-wallet** — unlimited wallets, parallel farming
-- **Telegram bot** — full control via chat commands
-- **Auto-scheduler** — 8h farming cycles + 30min sync
-- **All tasks automated:**
-  - ✅ Faucet claim (when social linked)
-  - ✅ Crate opens (5x daily, 150 QE each)
-  - ✅ Self-transfer transactions + sync
-  - ✅ Burn DACC → QE (1 DACC = 1000 QE)
-  - ✅ QE Pool staking
-  - ✅ Badge claiming (105 badges)
-  - ✅ Explorer visit task
-  - ✅ NFT minting
+```
+src/
+├── index.ts    — Entry point
+├── config.ts   — FB API URLs, User-Agent strings, cron schedules
+├── api.ts      — ViewpointsClient (cookie auth + DTSG + GraphQL)
+├── survey.ts   — Survey engine (fetch → answer → submit)
+├── bot.ts      — Telegram commands
+├── cron.ts     — Auto-scheduler (4h checks + 9AM daily report)
+└── store.ts    — SQLite (cookies, surveys, stats, endpoints)
+```
 
 ## Setup
 
+### 1. Environment Variables
+
+```bash
+cp .env.example .env
+# Fill in:
+# BOT_TOKEN — from @BotFather on Telegram
+# CHAT_ID — your Telegram user ID
+# FB_COOKIES — your Facebook cookies (optional, can set via /set_cookies)
+```
+
+### 2. Get Facebook Cookies
+
+1. Open **facebook.com** in Chrome (logged in)
+2. Press **F12** → **Application** tab → **Cookies** → `https://www.facebook.com`
+3. Copy these cookies: `c_user`, `xs`, `datr`, `fr`
+4. Format: `c_user=XXXXX;xs=XXXXX;datr=XXXXX;fr=XXXXX`
+5. Send to bot via `/set_cookies <cookies>`
+
+### 3. Install & Run
+
 ```bash
 npm install
-cp .env.example .env
-# Edit .env with your BOT_TOKEN, CHAT_ID, PRIVATE_KEYS
 npm run build
 npm start
 ```
@@ -32,15 +48,44 @@ npm start
 | Command | Description |
 |---------|-------------|
 | `/start` | Show help |
-| `/run` | Run full farming cycle |
-| `/status` | Wallet stats (QE, DACC, badges) |
-| `/balance` | DACC on-chain balance |
-| `/sync` | Sync transactions for QE |
-| `/crate` | Open daily crates |
-| `/burn <amt>` | Burn DACC for QE |
-| `/badges` | Claim all available badges |
-| `/wallets` | List configured wallets |
-| `/add_wallet <key>` | Add new wallet |
+| `/set_cookies <cookies>` | Set Facebook cookies |
+| `/check` | Validate session |
+| `/profile` | Show FB profile |
+| `/programs` | List available surveys |
+| `/run` | Auto-complete available surveys |
+| `/status` | Show bot stats |
+| `/history` | Recent completions |
+| `/points` | Check points balance |
+| `/add_endpoint <name> <doc_id>` | Add Viewpoints API endpoint |
+| `/endpoints` | List configured endpoints |
+
+## Finding Viewpoints API Endpoints
+
+The Viewpoints app uses Facebook's internal GraphQL API with stored query IDs (`doc_id`). To find them:
+
+1. Install **HTTP Toolkit** on your PC (free: httptoolkit.com)
+2. Connect your phone to HTTP Toolkit
+3. Open the **Viewpoints** app on your phone
+4. In HTTP Toolkit, look for **POST** requests to `graph.facebook.com/graphql`
+5. The request body contains `doc_id=XXXXXXXXXXXXX` — that's what you need
+6. Send to bot: `/add_endpoint programs <doc_id>`
+
+### Endpoint Names
+
+- `programs` — Fetches available surveys/tasks
+- `survey_detail` — Gets survey questions for a specific program
+- `submit` — Submits survey answers
+- `join` — Joins a program
+- `points` — Gets points balance
+
+## How Answer Generation Works
+
+- **Multiple choice**: Random option selection
+- **Rating (1-5)**: Biased toward positive (3-5 range)
+- **Yes/No**: Random 50/50
+- **Free text**: Pre-written realistic responses (positive bias)
+- **Slider**: Middle-to-high range with variance
+- **Human delays**: 2-8s between questions, 10-30s between surveys
 
 ## Deploy to Railway
 
@@ -48,27 +93,13 @@ npm start
 railway login
 railway init
 railway up
-# Set env vars in Railway dashboard
 ```
 
-## Chain Info
+Set environment variables in Railway dashboard: `BOT_TOKEN`, `CHAT_ID`, `FB_COOKIES`.
 
-- **RPC:** `https://rpctest.dachain.tech`
-- **Chain ID:** `21894`
-- **Explorer:** `https://exptest.dachain.tech`
-- **Exchange Contract:** `0x3691A78bE270dB1f3b1a86177A8f23F89A8Cef24`
+## Docker
 
-## Architecture
-
-```
-src/
-├── index.ts       — Entry point
-├── config.ts      — Constants & env
-├── api.ts         — Inception portal API client
-├── chain.ts       — On-chain (viem) operations
-├── tasks.ts       — Full farming cycle logic
-├── bot.ts         — Telegraf bot commands
-├── cron.ts        — Scheduled jobs
-├── wallets.ts     — Wallet management
-└── badge-keys.ts  — All 105 badge keys
+```bash
+docker build -t viewpoints-bot .
+docker run -d --env-file .env viewpoints-bot
 ```

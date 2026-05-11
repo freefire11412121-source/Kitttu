@@ -1,18 +1,19 @@
-export const DAC_RPC_URL = "https://rpctest.dachain.tech";
-export const DAC_CHAIN_ID = 21894;
-export const DAC_EXPLORER = "https://exptest.dachain.tech";
-export const INCEPTION_BASE = "https://inception.dachain.io";
-export const INCEPTION_API = `${INCEPTION_BASE}/api/inception`;
-export const EXCHANGE_CONTRACT = "0x3691A78bE270dB1f3b1a86177A8f23F89A8Cef24" as const;
-export const QE_PER_DACC = 1000;
-export const CRATE_COST = 150;
-export const DAILY_CRATE_LIMIT = 5;
-export const DAILY_QE_CAP = 3000;
-export const FAUCET_COOLDOWN_HOURS = 8;
-export const REF_CODE = "DAC3875657";
+export const FB_GRAPH_URL = "https://graph.facebook.com/v19.0";
+export const FB_WEB_API = "https://www.facebook.com/api/graphql/";
+export const VP_USER_AGENT =
+  "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/120.0.0.0 Mobile Safari/537.36 [FBAN/Viewpoints;FBAV/323.0.0.1.109;FBBV/100;FBDM/{density=3.0,width=1080,height=2400};FBLC/en_US;FBRV/0;FBCR/;FBMF/Google;FBBD/google;FBPN/com.facebook.viewpoints;FBDV/Pixel 8 Pro;FBSV/14;FBOP/1;FBCA/armeabi-v7a:armeabi;]";
+export const WEB_USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
+export const SURVEY_CHECK_INTERVAL = "0 */4 * * *"; // every 4 hours
+export const DAILY_REPORT_SCHEDULE = "0 9 * * *"; // 9 AM daily
 
 export function getEnvOrThrow(key: string): string {
   const v = process.env[key];
   if (!v) throw new Error(`Missing env: ${key}`);
   return v;
+}
+
+export function getEnvOptional(key: string, fallback: string): string {
+  return process.env[key] ?? fallback;
 }

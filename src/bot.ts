@@ -1,10 +1,8 @@
 import { Telegraf } from "telegraf";
 import { getEnvOrThrow } from "./config.js";
-import { runFullCycle, type TaskReport } from "./tasks.js";
-import { InceptionClient } from "./api.js";
-import { createDacWallet, getBalance, burnDacc } from "./chain.js";
-import { getWallets, addWallet } from "./wallets.js";
-import { ALL_BADGE_KEYS } from "./badge-keys.js";
+import { ViewpointsClient } from "./api.js";
+import { runSurveyCycle, type SurveyResult } from "./survey.js";
+import { saveCookies, getCookies, getStats, getRecentSurveys, saveEndpoint, getAllEndpoints } from "./store.js";
 
 let bot: Telegraf | null = null;
 
@@ -16,11 +14,24 @@ function isAllowed(chatId: number | string): boolean {
   return String(chatId) === getAllowedChatId();
 }
 
-function formatReports(reports: TaskReport[]): string {
-  if (reports.length === 0) return "No actions taken.";
-  const lines = reports.map(
-    (r) => `${r.success ? "✓" : "✗"} [${r.action}] ${r.detail.slice(0, 100)}`
+function getClient(): ViewpointsClient | null {
+  const cookies = getCookies();
+  if (!cookies) return null;
+  return new ViewpointsClient(cookies);
+}
+
+function formatResults(results: SurveyResult[]): string {
+  if (results.length === 0) return "No new surveys found.";
+  const lines = results.map(
+    (r) =>
+      `${r.success ? "✓" : "✗"} ${r.title}\n   ${
+        r.success ? `+${r.pointsEarned} pts` : `Error: ${r.error?.slice(0, 80) ?? "unknown"}`
+      }`
   );
+  const totalPts = results
+    .filter((r) => r.success)
+    .reduce((sum, r) => sum + r.pointsEarned, 0);
+  lines.push(`\nTotal earned: ${totalPts} pts | Completed: ${results.filter((r) => r.success).length}/${results.length}`);
   return lines.join("\n");
 }
 
@@ -39,176 +50,206 @@ export function startBot(): Telegraf {
 
   bot.command("start", (ctx) => {
     ctx.reply(
-      `DAC Airdrop Bot 🤖\n\nCommands:\n/run — Run full farming cycle\n/status — Show wallet stats\n/balance — Check DACC balance\n/sync — Sync transactions\n/crate — Open crates (max daily)\n/burn <amount> — Burn DACC for QE\n/badges — Claim all badges\n/wallets — List wallets\n/add_wallet <key> — Add wallet`
+      `Viewpoints Auto Bot\n\n` +
+      `Commands:\n` +
+      `/set_cookies <cookies> — Set Facebook cookies\n` +
+      `/check — Validate current session\n` +
+      `/run — Run survey auto-complete cycle\n` +
+      `/programs — List available programs\n` +
+      `/status — Show bot stats\n` +
+      `/history — Recent survey completions\n` +
+      `/points — Check points balance\n` +
+      `/profile — Show FB profile info\n\n` +
+      `Setup: Copy your Facebook cookies from browser and send them with /set_cookies`
     );
   });
 
-  bot.command("status", async (ctx) => {
-    const wallets = getWallets();
-    if (wallets.length === 0) {
-      ctx.reply("No wallets configured. Use /add_wallet <private_key>");
+  bot.command("set_cookies", (ctx) => {
+    const parts = ctx.message.text.split(" ");
+    const newCookies = parts.slice(1).join(" ").trim();
+    if (!newCookies) {
+      ctx.reply(
+        "Usage: /set_cookies <cookie_string>\n\n" +
+        "How to get cookies:\n" +
+        "1. Open facebook.com in Chrome (logged in)\n" +
+        "2. Press F12 → Application tab → Cookies\n" +
+        "3. Copy: c_user, xs, datr, fr cookies\n" +
+        "4. Format: c_user=XXX;xs=XXX;datr=XXX;fr=XXX"
+      );
       return;
     }
-    const lines: string[] = [];
-    for (const pk of wallets) {
-      try {
-        const { account, publicClient } = createDacWallet(pk as `0x${string}`);
-        const client = new InceptionClient(account.address);
-        await client.login();
-        const profile = await client.getProfile();
-        const bal = await getBalance(publicClient, account.address);
-        lines.push(
-          `📊 ${account.address.slice(0, 8)}...${account.address.slice(-4)}\n` +
-          `   QE: ${profile.qe_balance} | DACC: ${bal} | TX: ${profile.tx_count}\n` +
-          `   Streak: ${profile.streak_days}d | Badges: ${profile.badges.length} | Rank: #${profile.user_rank}`
-        );
-      } catch (e) {
-        lines.push(`❌ Error: ${String(e).slice(0, 80)}`);
-      }
-    }
-    ctx.reply(lines.join("\n\n"), { parse_mode: undefined });
+    saveCookies(newCookies);
+    ctx.reply("Cookies saved. Use /check to validate the session.");
   });
 
-  bot.command("balance", async (ctx) => {
-    const wallets = getWallets();
-    const lines: string[] = [];
-    for (const pk of wallets) {
-      const { account, publicClient } = createDacWallet(pk as `0x${string}`);
-      const bal = await getBalance(publicClient, account.address);
-      lines.push(`${account.address.slice(0, 10)}... → ${bal} DACC`);
+  bot.command("check", async (ctx) => {
+    const client = getClient();
+    if (!client) {
+      ctx.reply("No cookies set. Use /set_cookies <cookies>");
+      return;
     }
-    ctx.reply(lines.join("\n") || "No wallets.");
+    ctx.reply("Validating session...");
+    const valid = await client.validateCookies();
+    if (valid) {
+      try {
+        const profile = await client.getProfile();
+        ctx.reply(`Session valid!\nLogged in as: ${profile.name} (ID: ${profile.id})`);
+      } catch {
+        ctx.reply("Session is valid but could not fetch profile.");
+      }
+    } else {
+      ctx.reply("Session expired. Get new cookies from browser and use /set_cookies");
+    }
+  });
+
+  bot.command("profile", async (ctx) => {
+    const client = getClient();
+    if (!client) {
+      ctx.reply("No cookies set. Use /set_cookies <cookies>");
+      return;
+    }
+    try {
+      const profile = await client.getProfile();
+      const points = await client.getPointsBalance();
+      ctx.reply(
+        `Profile:\n` +
+        `Name: ${profile.name}\n` +
+        `ID: ${profile.id}\n` +
+        `Points: ${points}`
+      );
+    } catch (e) {
+      ctx.reply(`Error: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  });
+
+  bot.command("programs", async (ctx) => {
+    const client = getClient();
+    if (!client) {
+      ctx.reply("No cookies set. Use /set_cookies <cookies>");
+      return;
+    }
+    ctx.reply("Fetching programs...");
+    try {
+      const programs = await client.getAvailablePrograms();
+      if (programs.length === 0) {
+        ctx.reply("No programs available right now. Check back later.");
+        return;
+      }
+      const lines = programs.map(
+        (p) =>
+          `[${p.status}] ${p.name}\n   Type: ${p.type} | Points: ${p.points_reward}${
+            p.expires_at ? ` | Expires: ${p.expires_at}` : ""
+          }`
+      );
+      ctx.reply(`Programs (${programs.length}):\n\n${lines.join("\n\n")}`);
+    } catch (e) {
+      ctx.reply(`Error: ${e instanceof Error ? e.message : String(e)}`);
+    }
   });
 
   bot.command("run", async (ctx) => {
-    const wallets = getWallets();
-    if (wallets.length === 0) {
-      ctx.reply("No wallets. Use /add_wallet <private_key>");
+    const client = getClient();
+    if (!client) {
+      ctx.reply("No cookies set. Use /set_cookies <cookies>");
       return;
     }
-    ctx.reply(`Running full cycle for ${wallets.length} wallet(s)...`);
-    for (const pk of wallets) {
-      try {
-        const reports = await runFullCycle(pk as `0x${string}`);
-        const msg = formatReports(reports);
-        await ctx.reply(`Wallet done:\n${msg.slice(0, 4000)}`);
-      } catch (e) {
-        await ctx.reply(`Error: ${String(e).slice(0, 300)}`);
-      }
-    }
-    ctx.reply("✅ Full cycle complete.");
-  });
-
-  bot.command("sync", async (ctx) => {
-    const wallets = getWallets();
-    for (const pk of wallets) {
-      const { account } = createDacWallet(pk as `0x${string}`);
-      const client = new InceptionClient(account.address);
-      await client.login();
-      const r = await client.syncTransactions();
-      ctx.reply(`Sync ${account.address.slice(0, 10)}: TX=${r.tx_count} DACC=${r.dacc_balance}`);
+    ctx.reply("Starting survey auto-complete cycle...");
+    try {
+      const results = await runSurveyCycle(client);
+      const msg = formatResults(results);
+      await ctx.reply(msg);
+    } catch (e) {
+      ctx.reply(`Error: ${e instanceof Error ? e.message : String(e)}`);
     }
   });
 
-  bot.command("crate", async (ctx) => {
-    const wallets = getWallets();
-    for (const pk of wallets) {
-      const { account } = createDacWallet(pk as `0x${string}`);
-      const client = new InceptionClient(account.address);
-      await client.login();
-      const history = await client.getCrateHistory().catch(() => null);
-      const remaining = 5 - (history?.opens_today ?? 0);
-      const results: string[] = [];
-      for (let i = 0; i < remaining; i++) {
-        try {
-          const r = await client.openCrate();
-          results.push(`${r.reward.label}${r.reward.multiplier ? ` (${r.reward.multiplier}x boost!)` : ""}`);
-        } catch (e) {
-          results.push(`Error: ${String(e).slice(0, 60)}`);
-          break;
-        }
-      }
+  bot.command("status", (ctx) => {
+    const stats = getStats();
+    ctx.reply(
+      `Bot Status:\n` +
+      `Surveys completed: ${stats.total_surveys}\n` +
+      `Total points earned: ${stats.total_points}\n` +
+      `Last check: ${stats.last_check ?? "never"}\n` +
+      `Last completion: ${stats.last_complete ?? "never"}`
+    );
+  });
+
+  bot.command("history", (ctx) => {
+    const surveys = getRecentSurveys(10);
+    if (surveys.length === 0) {
+      ctx.reply("No survey history yet.");
+      return;
+    }
+    const lines = surveys.map(
+      (s) =>
+        `${s.status === "completed" ? "✓" : "○"} ${s.title}\n   ${s.points} pts | ${
+          s.completed_at ?? "pending"
+        }`
+    );
+    ctx.reply(`Recent Surveys:\n\n${lines.join("\n\n")}`);
+  });
+
+  bot.command("points", async (ctx) => {
+    const client = getClient();
+    if (!client) {
+      ctx.reply("No cookies set. Use /set_cookies <cookies>");
+      return;
+    }
+    try {
+      const points = await client.getPointsBalance();
+      ctx.reply(`Points balance: ${points}`);
+    } catch (e) {
+      ctx.reply(`Error: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  });
+
+  bot.command("add_endpoint", (ctx) => {
+    const parts = ctx.message.text.split(" ");
+    if (parts.length < 3) {
       ctx.reply(
-        `🎁 Crates ${account.address.slice(0, 10)}:\n${results.join("\n") || "No opens available"}`
+        "Usage: /add_endpoint <name> <doc_id> [variables_json]\n\n" +
+        "Names: programs, survey_detail, submit, join, points\n\n" +
+        "Example:\n/add_endpoint programs 12345678901234567\n" +
+        "/add_endpoint survey_detail 98765432109876543 {\"scale\":3}\n\n" +
+        "How to find doc_ids:\n" +
+        "1. Install HTTP Toolkit on PC\n" +
+        "2. Connect phone to HTTP Toolkit\n" +
+        "3. Open Viewpoints app on phone\n" +
+        "4. Look for POST requests to graph.facebook.com/graphql\n" +
+        "5. Copy the doc_id from the request body"
       );
-    }
-  });
-
-  bot.command("burn", async (ctx) => {
-    const amount = ctx.message.text.split(" ")[1];
-    if (!amount) {
-      ctx.reply("Usage: /burn <amount>");
       return;
     }
-    const wallets = getWallets();
-    for (const pk of wallets) {
-      const { wallet, account } = createDacWallet(pk as `0x${string}`);
-      const client = new InceptionClient(account.address);
-      await client.login();
-      try {
-        const txHash = await burnDacc(wallet, account, amount);
-        await new Promise((r) => setTimeout(r, 5000));
-        const confirm = await client.confirmBurn(txHash, amount);
-        ctx.reply(`🔥 Burned ${amount} DACC → ${confirm.qe_awarded ?? "?"} QE | tx: ${txHash.slice(0, 20)}...`);
-      } catch (e) {
-        ctx.reply(`Burn error: ${String(e).slice(0, 200)}`);
-      }
-    }
+    const name = parts[1];
+    const docId = parts[2];
+    const varsJson = parts.slice(3).join(" ").trim() || undefined;
+    saveEndpoint(name, docId, varsJson);
+    ctx.reply(`Endpoint '${name}' saved with doc_id=${docId}`);
   });
 
-  bot.command("badges", async (ctx) => {
-    const wallets = getWallets();
-    for (const pk of wallets) {
-      const { account } = createDacWallet(pk as `0x${string}`);
-      const client = new InceptionClient(account.address);
-      await client.login();
-      const profile = await client.getProfile();
-      const earned = new Set(profile.badges.map((b) => b.badge__key));
-      let claimed = 0;
-      let qeGained = 0;
-      for (const key of ALL_BADGE_KEYS) {
-        if (earned.has(key)) continue;
-        try {
-          const r = await client.claimBadge(key);
-          if (r.success) {
-            claimed++;
-            qeGained += r.qe_awarded ?? 0;
-          }
-        } catch { /* skip */ }
-      }
-      ctx.reply(`🏅 ${account.address.slice(0, 10)}: Claimed ${claimed} new badges (+${qeGained} QE)`);
-    }
-  });
-
-  bot.command("wallets", (ctx) => {
-    const wallets = getWallets();
-    if (wallets.length === 0) {
-      ctx.reply("No wallets configured.");
+  bot.command("endpoints", (ctx) => {
+    const endpoints = getAllEndpoints();
+    if (endpoints.length === 0) {
+      ctx.reply(
+        "No endpoints configured.\n\n" +
+        "Use /add_endpoint <name> <doc_id> to add Viewpoints API endpoints.\n" +
+        "You need to intercept traffic from the Viewpoints app to find doc_ids."
+      );
       return;
     }
-    const lines = wallets.map((pk, i) => {
-      const { account } = createDacWallet(pk as `0x${string}`);
-      return `${i + 1}. ${account.address}`;
-    });
-    ctx.reply(`Wallets (${wallets.length}):\n${lines.join("\n")}`);
-  });
-
-  bot.command("add_wallet", (ctx) => {
-    const key = ctx.message.text.split(" ")[1];
-    if (!key || !key.startsWith("0x") || key.length !== 66) {
-      ctx.reply("Usage: /add_wallet 0x<64hex>");
-      return;
-    }
-    addWallet(key);
-    const { account } = createDacWallet(key as `0x${string}`);
-    ctx.reply(`Added: ${account.address}`);
+    const lines = endpoints.map((e) => `${e.name}: ${e.doc_id}`);
+    ctx.reply(`Configured endpoints:\n\n${lines.join("\n")}`);
   });
 
   bot.launch();
-  console.log("🤖 DAC Airdrop Bot started");
+  console.log("Telegram bot started");
   return bot;
 }
 
-export function stopBot(): void {
-  bot?.stop();
+export function sendNotification(message: string): void {
+  if (!bot) return;
+  const chatId = process.env.CHAT_ID;
+  if (chatId) {
+    bot.telegram.sendMessage(chatId, message).catch(() => {});
+  }
 }
