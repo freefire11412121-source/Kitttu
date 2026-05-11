@@ -62,8 +62,9 @@ export function saveSurvey(
 ): void {
   const d = getDb();
   d.prepare(
-    `INSERT OR REPLACE INTO surveys (id, title, points, questions_json, created_at)
-     VALUES (?, ?, ?, ?, datetime('now'))`
+    `INSERT INTO surveys (id, title, points, questions_json, created_at)
+     VALUES (?, ?, ?, ?, datetime('now'))
+     ON CONFLICT(id) DO UPDATE SET title = excluded.title, points = excluded.points, questions_json = excluded.questions_json`
   ).run(id, title, points, questionsJson);
 }
 

@@ -130,7 +130,7 @@ export async function autoCompleteSurvey(
     // Get survey questions
     const detail: SurveyDetail = await client.getSurveyDetail(program.id);
     saveSurvey(
-      detail.id,
+      program.id,
       detail.title,
       detail.points_reward,
       JSON.stringify(detail.questions)
