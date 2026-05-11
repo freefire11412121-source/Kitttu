@@ -2,7 +2,7 @@ import { Telegraf } from "telegraf";
 import { getEnvOrThrow } from "./config.js";
 import { ViewpointsClient } from "./api.js";
 import { runSurveyCycle, type SurveyResult } from "./survey.js";
-import { saveToken, getToken, getStats, getRecentSurveys } from "./store.js";
+import { saveCookies, getCookies, getStats, getRecentSurveys, saveEndpoint, getAllEndpoints } from "./store.js";
 
 let bot: Telegraf | null = null;
 
@@ -15,9 +15,9 @@ function isAllowed(chatId: number | string): boolean {
 }
 
 function getClient(): ViewpointsClient | null {
-  const token = getToken();
-  if (!token) return null;
-  return new ViewpointsClient(token);
+  const cookies = getCookies();
+  if (!cookies) return null;
+  return new ViewpointsClient(cookies);
 }
 
 function formatResults(results: SurveyResult[]): string {
@@ -52,60 +52,60 @@ export function startBot(): Telegraf {
     ctx.reply(
       `Viewpoints Auto Bot\n\n` +
       `Commands:\n` +
-      `/set_token <token> — Set Facebook access token\n` +
-      `/check_token — Validate current token\n` +
+      `/set_cookies <cookies> — Set Facebook cookies\n` +
+      `/check — Validate current session\n` +
       `/run — Run survey auto-complete cycle\n` +
       `/programs — List available programs\n` +
       `/status — Show bot stats\n` +
       `/history — Recent survey completions\n` +
       `/points — Check points balance\n` +
       `/profile — Show FB profile info\n\n` +
-      `Setup: Extract your Facebook access token from the Viewpoints app and send it with /set_token`
+      `Setup: Copy your Facebook cookies from browser and send them with /set_cookies`
     );
   });
 
-  bot.command("set_token", (ctx) => {
+  bot.command("set_cookies", (ctx) => {
     const parts = ctx.message.text.split(" ");
-    const newToken = parts.slice(1).join(" ").trim();
-    if (!newToken) {
+    const newCookies = parts.slice(1).join(" ").trim();
+    if (!newCookies) {
       ctx.reply(
-        "Usage: /set_token <facebook_access_token>\n\n" +
-        "How to get your token:\n" +
-        "1. Install HTTP Toolkit or mitmproxy on your PC\n" +
-        "2. Connect your phone through the proxy\n" +
-        "3. Open Viewpoints app and look for requests to graph.facebook.com\n" +
-        "4. Copy the access_token parameter from any request"
+        "Usage: /set_cookies <cookie_string>\n\n" +
+        "How to get cookies:\n" +
+        "1. Open facebook.com in Chrome (logged in)\n" +
+        "2. Press F12 → Application tab → Cookies\n" +
+        "3. Copy: c_user, xs, datr, fr cookies\n" +
+        "4. Format: c_user=XXX;xs=XXX;datr=XXX;fr=XXX"
       );
       return;
     }
-    saveToken(newToken);
-    ctx.reply("Token saved. Use /check_token to validate it.");
+    saveCookies(newCookies);
+    ctx.reply("Cookies saved. Use /check to validate the session.");
   });
 
-  bot.command("check_token", async (ctx) => {
+  bot.command("check", async (ctx) => {
     const client = getClient();
     if (!client) {
-      ctx.reply("No token set. Use /set_token <token>");
+      ctx.reply("No cookies set. Use /set_cookies <cookies>");
       return;
     }
-    ctx.reply("Validating token...");
-    const valid = await client.validateToken();
+    ctx.reply("Validating session...");
+    const valid = await client.validateCookies();
     if (valid) {
       try {
         const profile = await client.getProfile();
-        ctx.reply(`Token valid!\nLogged in as: ${profile.name} (ID: ${profile.id})`);
+        ctx.reply(`Session valid!\nLogged in as: ${profile.name} (ID: ${profile.id})`);
       } catch {
-        ctx.reply("Token is valid but could not fetch profile.");
+        ctx.reply("Session is valid but could not fetch profile.");
       }
     } else {
-      ctx.reply("Token is invalid or expired. Please get a new one and use /set_token");
+      ctx.reply("Session expired. Get new cookies from browser and use /set_cookies");
     }
   });
 
   bot.command("profile", async (ctx) => {
     const client = getClient();
     if (!client) {
-      ctx.reply("No token set. Use /set_token <token>");
+      ctx.reply("No cookies set. Use /set_cookies <cookies>");
       return;
     }
     try {
@@ -125,7 +125,7 @@ export function startBot(): Telegraf {
   bot.command("programs", async (ctx) => {
     const client = getClient();
     if (!client) {
-      ctx.reply("No token set. Use /set_token <token>");
+      ctx.reply("No cookies set. Use /set_cookies <cookies>");
       return;
     }
     ctx.reply("Fetching programs...");
@@ -150,7 +150,7 @@ export function startBot(): Telegraf {
   bot.command("run", async (ctx) => {
     const client = getClient();
     if (!client) {
-      ctx.reply("No token set. Use /set_token <token>");
+      ctx.reply("No cookies set. Use /set_cookies <cookies>");
       return;
     }
     ctx.reply("Starting survey auto-complete cycle...");
@@ -192,7 +192,7 @@ export function startBot(): Telegraf {
   bot.command("points", async (ctx) => {
     const client = getClient();
     if (!client) {
-      ctx.reply("No token set. Use /set_token <token>");
+      ctx.reply("No cookies set. Use /set_cookies <cookies>");
       return;
     }
     try {
@@ -201,6 +201,44 @@ export function startBot(): Telegraf {
     } catch (e) {
       ctx.reply(`Error: ${e instanceof Error ? e.message : String(e)}`);
     }
+  });
+
+  bot.command("add_endpoint", (ctx) => {
+    const parts = ctx.message.text.split(" ");
+    if (parts.length < 3) {
+      ctx.reply(
+        "Usage: /add_endpoint <name> <doc_id> [variables_json]\n\n" +
+        "Names: programs, survey_detail, submit, join, points\n\n" +
+        "Example:\n/add_endpoint programs 12345678901234567\n" +
+        "/add_endpoint survey_detail 98765432109876543 {\"scale\":3}\n\n" +
+        "How to find doc_ids:\n" +
+        "1. Install HTTP Toolkit on PC\n" +
+        "2. Connect phone to HTTP Toolkit\n" +
+        "3. Open Viewpoints app on phone\n" +
+        "4. Look for POST requests to graph.facebook.com/graphql\n" +
+        "5. Copy the doc_id from the request body"
+      );
+      return;
+    }
+    const name = parts[1];
+    const docId = parts[2];
+    const varsJson = parts.slice(3).join(" ").trim() || undefined;
+    saveEndpoint(name, docId, varsJson);
+    ctx.reply(`Endpoint '${name}' saved with doc_id=${docId}`);
+  });
+
+  bot.command("endpoints", (ctx) => {
+    const endpoints = getAllEndpoints();
+    if (endpoints.length === 0) {
+      ctx.reply(
+        "No endpoints configured.\n\n" +
+        "Use /add_endpoint <name> <doc_id> to add Viewpoints API endpoints.\n" +
+        "You need to intercept traffic from the Viewpoints app to find doc_ids."
+      );
+      return;
+    }
+    const lines = endpoints.map((e) => `${e.name}: ${e.doc_id}`);
+    ctx.reply(`Configured endpoints:\n\n${lines.join("\n")}`);
   });
 
   bot.launch();

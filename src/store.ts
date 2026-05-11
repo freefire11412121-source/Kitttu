@@ -32,26 +32,32 @@ function getDb(): Database.Database {
         last_check TEXT,
         last_complete TEXT
       );
+      CREATE TABLE IF NOT EXISTS endpoints (
+        name TEXT PRIMARY KEY,
+        doc_id TEXT NOT NULL,
+        variables_template TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+      );
     `);
     db.exec(`INSERT OR IGNORE INTO stats (id) VALUES (1)`);
   }
   return db;
 }
 
-export function saveToken(token: string): void {
+export function saveCookies(cookies: string): void {
   const d = getDb();
   d.prepare(
     `INSERT INTO tokens (id, fb_access_token, updated_at) VALUES (1, ?, datetime('now'))
      ON CONFLICT(id) DO UPDATE SET fb_access_token = excluded.fb_access_token, updated_at = excluded.updated_at`
-  ).run(token);
+  ).run(cookies);
 }
 
-export function getToken(): string | null {
+export function getCookies(): string | null {
   const d = getDb();
   const row = d.prepare("SELECT fb_access_token FROM tokens WHERE id = 1").get() as
     | { fb_access_token: string }
     | undefined;
-  return row?.fb_access_token ?? process.env.FB_ACCESS_TOKEN ?? null;
+  return row?.fb_access_token ?? process.env.FB_COOKIES ?? null;
 }
 
 export function saveSurvey(
@@ -109,6 +115,35 @@ export interface Stats {
 export function getStats(): Stats {
   const d = getDb();
   return d.prepare("SELECT * FROM stats WHERE id = 1").get() as Stats;
+}
+
+export function saveEndpoint(
+  name: string,
+  docId: string,
+  variablesTemplate?: string
+): void {
+  const d = getDb();
+  d.prepare(
+    `INSERT INTO endpoints (name, doc_id, variables_template, created_at)
+     VALUES (?, ?, ?, datetime('now'))
+     ON CONFLICT(name) DO UPDATE SET doc_id = excluded.doc_id, variables_template = excluded.variables_template`
+  ).run(name, docId, variablesTemplate ?? null);
+}
+
+export function getEndpoint(name: string): { doc_id: string; variables_template: string | null } | null {
+  const d = getDb();
+  return d.prepare("SELECT doc_id, variables_template FROM endpoints WHERE name = ?").get(name) as
+    | { doc_id: string; variables_template: string | null }
+    | undefined
+    ?? null;
+}
+
+export function getAllEndpoints(): Array<{ name: string; doc_id: string }> {
+  const d = getDb();
+  return d.prepare("SELECT name, doc_id FROM endpoints ORDER BY name").all() as Array<{
+    name: string;
+    doc_id: string;
+  }>;
 }
 
 export function getRecentSurveys(limit = 10): Array<{

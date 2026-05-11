@@ -1,4 +1,5 @@
-import { FB_GRAPH_URL, VP_USER_AGENT } from "./config.js";
+import { FB_WEB_API, WEB_USER_AGENT } from "./config.js";
+import { getEndpoint } from "./store.js";
 
 export interface VPProgram {
   id: string;
@@ -45,126 +46,135 @@ export interface VPProfile {
   member_since: string;
 }
 
-interface GraphQLResponse<T> {
-  data: T;
-  errors?: Array<{ message: string; code?: number }>;
+interface ParsedCookies {
+  raw: string;
+  cUser: string;
+  xs: string;
+  datr: string;
+}
+
+function parseFBCookies(cookieStr: string): ParsedCookies {
+  const map: Record<string, string> = {};
+  for (const part of cookieStr.split(";")) {
+    const trimmed = part.trim();
+    const eqIdx = trimmed.indexOf("=");
+    if (eqIdx > 0) {
+      map[trimmed.slice(0, eqIdx).trim()] = trimmed.slice(eqIdx + 1).trim();
+    }
+  }
+  return {
+    raw: cookieStr,
+    cUser: map["c_user"] ?? "",
+    xs: map["xs"] ?? "",
+    datr: map["datr"] ?? "",
+  };
 }
 
 export class ViewpointsClient {
-  private accessToken: string;
+  private cookies: ParsedCookies;
+  private dtsg = "";
 
-  constructor(accessToken: string) {
-    this.accessToken = accessToken;
+  constructor(cookieStr: string) {
+    this.cookies = parseFBCookies(cookieStr);
   }
 
-  updateToken(token: string): void {
-    this.accessToken = token;
+  updateCookies(cookieStr: string): void {
+    this.cookies = parseFBCookies(cookieStr);
+    this.dtsg = "";
   }
 
-  private async restRequest<T>(
-    endpoint: string,
-    method: "GET" | "POST" = "GET",
-    body?: Record<string, unknown>
-  ): Promise<T> {
-    const url = new URL(`${FB_GRAPH_URL}${endpoint}`);
-    if (method === "GET") {
-      url.searchParams.set("access_token", this.accessToken);
-    }
+  private async fetchDtsg(): Promise<string> {
+    if (this.dtsg) return this.dtsg;
 
-    const headers: Record<string, string> = {
-      "User-Agent": VP_USER_AGENT,
-      Accept: "application/json",
-    };
-
-    let fetchBody: string | undefined;
-    if (method === "POST") {
-      headers["Content-Type"] = "application/x-www-form-urlencoded";
-      const params = new URLSearchParams();
-      params.set("access_token", this.accessToken);
-      if (body) {
-        for (const [k, v] of Object.entries(body)) {
-          params.set(k, typeof v === "string" ? v : JSON.stringify(v));
-        }
-      }
-      fetchBody = params.toString();
-    }
-
-    const res = await fetch(url.toString(), {
-      method,
-      headers,
-      body: fetchBody,
+    const res = await fetch("https://www.facebook.com/", {
+      headers: {
+        "User-Agent": WEB_USER_AGENT,
+        Cookie: this.cookies.raw,
+        Accept:
+          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
+      },
     });
-
     const text = await res.text();
-    if (!res.ok) {
-      let errorMsg = `HTTP ${res.status}: ${text.slice(0, 300)}`;
-      try {
-        const errJson = JSON.parse(text) as { error?: { message?: string; code?: number } };
-        if (errJson.error?.message) {
-          errorMsg = `FB API Error ${errJson.error.code ?? res.status}: ${errJson.error.message}`;
-        }
-      } catch {
-        // use raw text
-      }
-      throw new Error(errorMsg);
+    const match = text.match(/"DTSGInitData"[^}]*"token":"([^"]+)"/);
+    if (!match) {
+      throw new Error("Could not extract DTSG token. Cookies may be expired.");
     }
-
-    try {
-      return JSON.parse(text) as T;
-    } catch {
-      throw new Error(`Non-JSON response: ${text.slice(0, 200)}`);
-    }
+    this.dtsg = match[1];
+    return this.dtsg;
   }
 
-  /**
-   * Facebook apps use GraphQL stored queries via /graphql endpoint.
-   * The Viewpoints app uses HaloViewpointsTask, StructuredSurvey, and
-   * ResearchPollSurvey types internally. Queries are referenced by doc_id.
-   */
-  private async graphqlRequest<T>(
-    docId: string,
-    variables: Record<string, unknown> = {}
+  private async webGraphQL<T>(
+    friendlyName: string,
+    variables: Record<string, unknown> = {},
+    docId?: string
   ): Promise<T> {
-    const url = `${FB_GRAPH_URL}/graphql`;
+    const dtsg = await this.fetchDtsg();
 
     const params = new URLSearchParams();
-    params.set("access_token", this.accessToken);
-    params.set("doc_id", docId);
+    params.set("fb_dtsg", dtsg);
+    params.set("fb_api_caller_class", "RelayModern");
+    params.set("fb_api_req_friendly_name", friendlyName);
     params.set("variables", JSON.stringify(variables));
+    params.set("server_timestamps", "true");
+    if (docId) {
+      params.set("doc_id", docId);
+    }
 
-    const res = await fetch(url, {
+    const res = await fetch(FB_WEB_API, {
       method: "POST",
       headers: {
-        "User-Agent": VP_USER_AGENT,
+        "User-Agent": WEB_USER_AGENT,
+        Cookie: this.cookies.raw,
         "Content-Type": "application/x-www-form-urlencoded",
-        Accept: "application/json",
+        Accept: "*/*",
+        Origin: "https://www.facebook.com",
+        Referer: "https://www.facebook.com/",
       },
       body: params.toString(),
     });
 
     const text = await res.text();
     if (!res.ok) {
-      throw new Error(`GraphQL HTTP ${res.status}: ${text.slice(0, 300)}`);
+      throw new Error(`Web GraphQL HTTP ${res.status}: ${text.slice(0, 300)}`);
     }
 
-    try {
-      const json = JSON.parse(text) as GraphQLResponse<T>;
-      if (json.errors?.length) {
-        throw new Error(`GraphQL error: ${json.errors[0].message}`);
+    // Facebook may return multiple JSON objects separated by newlines
+    const lines = text.split("\n").filter((l) => l.trim());
+    for (const line of lines) {
+      try {
+        const json = JSON.parse(line) as {
+          data?: T;
+          errors?: Array<{ message: string }>;
+        };
+        if (json.errors?.length) {
+          throw new Error(`GraphQL: ${json.errors[0].message}`);
+        }
+        if (json.data) return json.data;
+      } catch (e) {
+        if (e instanceof Error && e.message.startsWith("GraphQL:")) throw e;
+        continue;
       }
-      return json.data;
-    } catch (e) {
-      if (e instanceof Error && e.message.startsWith("GraphQL error:")) throw e;
-      throw new Error(`Non-JSON GraphQL response: ${text.slice(0, 200)}`);
+    }
+
+    // If no data field found, try parsing the whole response
+    try {
+      return JSON.parse(text) as T;
+    } catch {
+      throw new Error(`Unexpected GraphQL response: ${text.slice(0, 200)}`);
     }
   }
 
-  async validateToken(): Promise<boolean> {
+  async validateCookies(): Promise<boolean> {
     try {
-      const result = await this.restRequest<{
-        data: { app_id: string; is_valid: boolean; expires_at: number };
-      }>(`/debug_token?input_token=${this.accessToken}`);
-      return result.data.is_valid;
+      await this.fetchDtsg();
+      return true;
     } catch {
       return false;
     }
@@ -172,344 +182,424 @@ export class ViewpointsClient {
 
   async getProfile(): Promise<VPProfile> {
     try {
-      const me = await this.restRequest<{
-        id: string;
-        name: string;
-      }>("/me?fields=id,name");
+      await this.fetchDtsg();
+      const userId = this.cookies.cUser;
+      if (!userId) throw new Error("No c_user in cookies");
+
+      // Use the CometProfilePageQuery or similar to get user info
+      const result = await this.webGraphQL<{
+        user?: { id: string; name: string };
+        node?: { id: string; name: string };
+      }>("CometProfileTopAppSectionQuery", {
+        userID: userId,
+        scale: 1,
+      });
+
+      const user = result.user ?? result.node;
       return {
-        id: me.id,
-        name: me.name,
+        id: user?.id ?? userId,
+        name: user?.name ?? "Facebook User",
         points_balance: 0,
         surveys_completed: 0,
         rewards_redeemed: 0,
         member_since: "",
       };
-    } catch (e) {
-      throw new Error(`Failed to get profile: ${e instanceof Error ? e.message : String(e)}`);
+    } catch {
+      return {
+        id: this.cookies.cUser,
+        name: "User " + this.cookies.cUser,
+        points_balance: 0,
+        surveys_completed: 0,
+        rewards_redeemed: 0,
+        member_since: "",
+      };
     }
   }
 
   async getAvailablePrograms(): Promise<VPProgram[]> {
-    // Strategy 1: Try GraphQL stored queries used by the Viewpoints app
-    // The app uses HaloViewpointsTask/HaloViewpointsQueue types internally
-    // These doc_ids are extracted from the APK — update if traffic intercept reveals different IDs
-    const graphqlDocIds = [
-      "6743842475688132", // ViewpointsForYouProgramsQuery (estimated)
-      "7294610490581234", // ViewpointsAvailableTasksQuery (estimated)
+    // Priority 1: Use user-configured doc_ids from /add_endpoint
+    const savedEndpoint = getEndpoint("programs");
+    if (savedEndpoint) {
+      try {
+        const vars = savedEndpoint.variables_template
+          ? (JSON.parse(savedEndpoint.variables_template) as Record<string, unknown>)
+          : {};
+        const result = await this.webGraphQL<Record<string, unknown>>(
+          "ViewpointsProgramsQuery",
+          vars,
+          savedEndpoint.doc_id
+        );
+        const programs = extractPrograms(result);
+        if (programs.length > 0) return programs;
+      } catch {
+        // fall through to other approaches
+      }
+    }
+
+    // Approach 1: Try known survey-related GraphQL queries
+    const surveyQueries = [
+      { name: "FBResearchSurveyRootQuery", vars: {} },
+      { name: "ResearchPollSurveyQuery", vars: {} },
+      { name: "StructuredSurveyRootQuery", vars: {} },
+      { name: "CometViewpointsProgramsQuery", vars: { scale: 3 } },
+      { name: "ViewpointsForYouTabQuery", vars: { scale: 3 } },
     ];
 
-    for (const docId of graphqlDocIds) {
+    for (const q of surveyQueries) {
       try {
-        const result = await this.graphqlRequest<{
-          viewer: {
-            viewpoints_programs?: {
-              edges: Array<{
-                node: {
-                  id: string;
-                  name: string;
-                  description: string;
-                  reward_amount: number;
-                  status: string;
-                  program_type: string;
-                  end_time: string;
-                };
-              }>;
-            };
-            halo_viewpoints_tasks?: {
-              edges: Array<{
-                node: {
-                  id: string;
-                  name: string;
-                  creation_time: string;
-                };
-              }>;
-            };
-          };
-        }>(docId, { scale: 3 });
+        const result = await this.webGraphQL<Record<string, unknown>>(
+          q.name,
+          q.vars
+        );
 
-        const programs = result.viewer?.viewpoints_programs?.edges ?? [];
-        if (programs.length > 0) {
-          return programs.map((e) => ({
-            id: e.node.id,
-            name: e.node.name,
-            description: e.node.description ?? "",
-            points_reward: e.node.reward_amount ?? 0,
-            status: mapStatus(e.node.status),
-            type: mapType(e.node.program_type),
-            expires_at: e.node.end_time ?? null,
-          }));
-        }
-
-        const tasks = result.viewer?.halo_viewpoints_tasks?.edges ?? [];
-        if (tasks.length > 0) {
-          return tasks.map((e) => ({
-            id: e.node.id,
-            name: e.node.name,
-            description: "",
-            points_reward: 0,
-            status: "available" as const,
-            type: "task" as const,
-            expires_at: null,
-          }));
-        }
+        const programs = extractPrograms(result);
+        if (programs.length > 0) return programs;
       } catch {
         continue;
       }
     }
 
-    // Strategy 2: Try REST-style Graph API endpoints
-    const restEndpoints = [
-      "/me/viewpoints_programs?fields=id,name,description,reward_amount,status,program_type,end_time",
-      "/me/viewpoints_tasks?fields=id,name,creation_time",
-    ];
+    // Approach 2: Try fetching the Viewpoints web page and parse any embedded data
+    try {
+      const res = await fetch("https://www.facebook.com/viewpoints/", {
+        headers: {
+          "User-Agent": WEB_USER_AGENT,
+          Cookie: this.cookies.raw,
+          Accept: "text/html",
+        },
+      });
+      const html = await res.text();
+      const programs = extractProgramsFromHTML(html);
+      if (programs.length > 0) return programs;
+    } catch {
+      // ignore
+    }
 
-    for (const endpoint of restEndpoints) {
-      try {
-        const result = await this.restRequest<{
-          data: Array<{
-            id: string;
-            name: string;
-            description?: string;
-            reward_amount?: number;
-            status?: string;
-            program_type?: string;
-            end_time?: string;
-            creation_time?: string;
-          }>;
-        }>(endpoint);
-
-        if (result.data?.length > 0) {
-          return result.data.map((p) => ({
-            id: p.id,
-            name: p.name,
-            description: p.description ?? "",
-            points_reward: p.reward_amount ?? 0,
-            status: mapStatus(p.status ?? "available"),
-            type: mapType(p.program_type ?? "task"),
-            expires_at: p.end_time ?? null,
-          }));
-        }
-      } catch {
-        continue;
-      }
+    // Approach 3: Scrape the Facebook research/survey pages
+    try {
+      const res = await fetch("https://www.facebook.com/research/surveys/", {
+        headers: {
+          "User-Agent": WEB_USER_AGENT,
+          Cookie: this.cookies.raw,
+          Accept: "text/html",
+        },
+      });
+      const html = await res.text();
+      const programs = extractProgramsFromHTML(html);
+      if (programs.length > 0) return programs;
+    } catch {
+      // ignore
     }
 
     throw new Error(
-      "Could not fetch programs. Your access token may be invalid or expired. " +
-      "Use /set_token to update it. If the token is valid, the doc_ids in the code " +
-      "may need updating — intercept your app traffic to find the correct query IDs."
+      "Could not fetch programs. Cookies may be expired or no surveys are available. " +
+      "Use /set_cookies to update."
     );
   }
 
   async getSurveyDetail(programId: string): Promise<SurveyDetail> {
-    // Strategy 1: GraphQL — StructuredSurvey type has structured_questions, survey_flow
-    const surveyDocIds = [
-      "5847291628672345", // ViewpointsSurveyDetailQuery (estimated)
+    // Try to fetch survey detail via GraphQL
+    const queries = [
+      {
+        name: "StructuredSurveyDetailQuery",
+        vars: { survey_id: programId, scale: 3 },
+      },
+      {
+        name: "ResearchPollDetailQuery",
+        vars: { poll_id: programId, scale: 3 },
+      },
     ];
 
-    for (const docId of surveyDocIds) {
+    for (const q of queries) {
       try {
-        const result = await this.graphqlRequest<{
-          node: {
-            id: string;
-            name: string;
-            description: string;
-            reward_amount: number;
-            estimated_time: number;
-            structured_survey?: {
-              id: string;
-              name: string;
-              survey_flow_type: string;
-              structured_questions: {
-                nodes: Array<{
-                  id: string;
-                  body: { text: string };
-                  question_class: string;
-                  is_required: boolean;
-                  response_options: Array<{
-                    option_value: string;
-                    option_text: { text: string };
-                    option_numeric_value: number;
-                  }>;
-                }>;
-              };
-            };
-          };
-        }>(docId, { program_id: programId, scale: 3 });
-
-        const survey = result.node?.structured_survey;
-        const questions: SurveyQuestion[] = (
-          survey?.structured_questions?.nodes ?? []
-        ).map((q) => ({
-          id: q.id,
-          text: q.body?.text ?? "",
-          type: mapQuestionType(q.question_class),
-          options: q.response_options?.map((o) => ({
-            id: o.option_value,
-            text: o.option_text?.text ?? "",
-          })),
-          required: q.is_required ?? true,
-        }));
-
-        return {
-          id: result.node.id,
-          title: survey?.name ?? result.node.name,
-          description: result.node.description ?? "",
-          points_reward: result.node.reward_amount ?? 0,
-          questions,
-          estimated_time_minutes: result.node.estimated_time ?? 5,
-        };
+        const result = await this.webGraphQL<Record<string, unknown>>(
+          q.name,
+          q.vars
+        );
+        const detail = extractSurveyDetail(result, programId);
+        if (detail) return detail;
       } catch {
         continue;
       }
     }
 
-    // Strategy 2: REST — fetch node directly
+    // Fallback: try fetching the survey page directly
     try {
-      const result = await this.restRequest<{
-        id: string;
-        name: string;
-        description: string;
-        reward_amount: number;
-        estimated_time: number;
-        questions: {
-          data: Array<{
-            id: string;
-            question_text: string;
-            question_type: string;
-            options?: Array<{ id: string; option_text: string }>;
-            min_value?: number;
-            max_value?: number;
-            is_required: boolean;
-          }>;
-        };
-      }>(`/${programId}?fields=id,name,description,reward_amount,questions`);
-
-      const questions: SurveyQuestion[] = (result.questions?.data ?? []).map((q) => ({
-        id: q.id,
-        text: q.question_text,
-        type: mapQuestionType(q.question_type),
-        options: q.options?.map((o) => ({ id: o.id, text: o.option_text })),
-        min_value: q.min_value,
-        max_value: q.max_value,
-        required: q.is_required ?? true,
-      }));
-
-      return {
-        id: result.id,
-        title: result.name,
-        description: result.description ?? "",
-        points_reward: result.reward_amount ?? 0,
-        questions,
-        estimated_time_minutes: result.estimated_time ?? 5,
-      };
+      const res = await fetch(`https://www.facebook.com/survey/${programId}/`, {
+        headers: {
+          "User-Agent": WEB_USER_AGENT,
+          Cookie: this.cookies.raw,
+          Accept: "text/html",
+        },
+      });
+      const html = await res.text();
+      const detail = extractSurveyDetailFromHTML(html, programId);
+      if (detail) return detail;
     } catch {
-      throw new Error(`Could not fetch survey details for ${programId}`);
+      // ignore
     }
+
+    throw new Error(`Could not fetch survey details for ${programId}`);
   }
 
   async submitSurvey(
     programId: string,
     answers: Array<{ question_id: string; answer: string }>
   ): Promise<SubmitResult> {
-    // Strategy 1: GraphQL mutation for survey response submission
-    const mutationDocIds = [
-      "4928371650294812", // ViewpointsSurveyResponseMutation (estimated)
-    ];
-
-    for (const docId of mutationDocIds) {
-      try {
-        const result = await this.graphqlRequest<{
-          viewpoints_submit_survey_response: {
-            success: boolean;
-            points_earned: number;
-            total_points: number;
-            message: string;
-          };
-        }>(docId, {
+    // Try GraphQL mutation for survey submission
+    const mutations = [
+      {
+        name: "StructuredSurveyResponseMutation",
+        vars: {
           input: {
-            program_id: programId,
+            survey_id: programId,
             responses: answers.map((a) => ({
               question_id: a.question_id,
               response_value: a.answer,
             })),
           },
-        });
+        },
+      },
+      {
+        name: "ResearchPollVoteMutation",
+        vars: {
+          input: {
+            poll_id: programId,
+            answers: answers.map((a) => ({
+              question_id: a.question_id,
+              response_id: a.answer,
+            })),
+          },
+        },
+      },
+      {
+        name: "ViewpointsSurveyCompleteMutation",
+        vars: {
+          input: {
+            program_id: programId,
+            responses: answers,
+          },
+        },
+      },
+    ];
 
-        const r = result.viewpoints_submit_survey_response;
-        return {
-          success: r?.success ?? true,
-          points_earned: r?.points_earned ?? 0,
-          total_points: r?.total_points ?? 0,
-          message: r?.message ?? "Submitted",
-        };
+    for (const m of mutations) {
+      try {
+        const result = await this.webGraphQL<Record<string, unknown>>(
+          m.name,
+          m.vars
+        );
+        return extractSubmitResult(result);
       } catch {
         continue;
       }
     }
 
-    // Strategy 2: REST-style POST
-    const restEndpoints = [
-      `/${programId}/responses`,
-      `/${programId}/submit`,
-    ];
-
-    for (const endpoint of restEndpoints) {
-      try {
-        const result = await this.restRequest<{
-          success: boolean;
-          points_earned: number;
-          total_points: number;
-          message: string;
-        }>(endpoint, "POST", {
-          responses: JSON.stringify(answers),
-        });
-
-        return {
-          success: result.success ?? true,
-          points_earned: result.points_earned ?? 0,
-          total_points: result.total_points ?? 0,
-          message: result.message ?? "Survey submitted",
-        };
-      } catch (e) {
-        if (endpoint === restEndpoints[restEndpoints.length - 1]) {
-          throw new Error(`Submit failed: ${e instanceof Error ? e.message : String(e)}`);
-        }
-        continue;
-      }
-    }
-
-    throw new Error("All submission endpoints failed");
+    throw new Error("All submission methods failed. Survey may not be submittable from web.");
   }
 
   async joinProgram(programId: string): Promise<boolean> {
-    // Try GraphQL mutation first, then REST
     try {
-      await this.graphqlRequest<unknown>("6192837450128347", {
+      await this.webGraphQL("ViewpointsJoinProgramMutation", {
         input: { program_id: programId },
       });
       return true;
     } catch {
-      try {
-        await this.restRequest(`/${programId}/join`, "POST");
-        return true;
-      } catch {
-        return false;
-      }
+      return false;
     }
   }
 
   async getPointsBalance(): Promise<number> {
     try {
-      const result = await this.restRequest<{
-        points_balance?: number;
-        data?: { points_balance?: number };
-      }>("/me/viewpoints_points");
-      return result.points_balance ?? result.data?.points_balance ?? 0;
+      const result = await this.webGraphQL<{
+        viewer?: { viewpoints_points?: { balance: number } };
+      }>("ViewpointsPointsQuery", {});
+      return result.viewer?.viewpoints_points?.balance ?? 0;
     } catch {
       return 0;
     }
   }
+}
+
+// Deep-search a JSON object for program/survey-like structures
+function extractPrograms(obj: unknown): VPProgram[] {
+  const programs: VPProgram[] = [];
+  if (!obj || typeof obj !== "object") return programs;
+
+  const record = obj as Record<string, unknown>;
+
+  // Look for arrays of objects with id + name
+  for (const val of Object.values(record)) {
+    if (Array.isArray(val)) {
+      for (const item of val) {
+        if (
+          typeof item === "object" &&
+          item !== null &&
+          "id" in item &&
+          "name" in item
+        ) {
+          const node = item as Record<string, unknown>;
+          programs.push({
+            id: String(node.id),
+            name: String(node.name ?? ""),
+            description: String(node.description ?? ""),
+            points_reward: Number(node.reward_amount ?? node.points ?? 0),
+            status: mapStatus(String(node.status ?? "available")),
+            type: mapType(String(node.program_type ?? node.type ?? "survey")),
+            expires_at: node.end_time ? String(node.end_time) : null,
+          });
+        }
+      }
+    }
+    // Check edges pattern
+    if (typeof val === "object" && val !== null && "edges" in val) {
+      const edges = (val as Record<string, unknown>).edges;
+      if (Array.isArray(edges)) {
+        for (const edge of edges) {
+          const node = (edge as Record<string, unknown>).node as
+            | Record<string, unknown>
+            | undefined;
+          if (node?.id && node?.name) {
+            programs.push({
+              id: String(node.id),
+              name: String(node.name),
+              description: String(node.description ?? ""),
+              points_reward: Number(node.reward_amount ?? 0),
+              status: mapStatus(String(node.status ?? "available")),
+              type: mapType(String(node.program_type ?? "survey")),
+              expires_at: node.end_time ? String(node.end_time) : null,
+            });
+          }
+        }
+      }
+    }
+    // Recurse into nested objects
+    if (typeof val === "object" && val !== null && !Array.isArray(val)) {
+      programs.push(...extractPrograms(val));
+    }
+  }
+  return programs;
+}
+
+function extractProgramsFromHTML(html: string): VPProgram[] {
+  const programs: VPProgram[] = [];
+  // Look for JSON data embedded in script tags
+  const jsonMatches = html.matchAll(
+    /data-sjs>\s*(\{.*?"require".*?\})\s*<\/script/g
+  );
+  for (const match of jsonMatches) {
+    try {
+      const data = JSON.parse(match[1]);
+      programs.push(...extractPrograms(data));
+    } catch {
+      continue;
+    }
+  }
+  return programs;
+}
+
+function extractSurveyDetail(
+  obj: unknown,
+  fallbackId: string
+): SurveyDetail | null {
+  if (!obj || typeof obj !== "object") return null;
+  const record = obj as Record<string, unknown>;
+
+  // Look for structured_questions or questions arrays
+  for (const val of Object.values(record)) {
+    if (typeof val !== "object" || val === null) continue;
+    const node = val as Record<string, unknown>;
+
+    if (node.structured_questions || node.questions) {
+      const questionsData = (node.structured_questions ?? node.questions) as
+        | { nodes?: unknown[] }
+        | unknown[];
+      const rawQuestions = Array.isArray(questionsData)
+        ? questionsData
+        : (questionsData as Record<string, unknown>).nodes ?? [];
+
+      const questions: SurveyQuestion[] = (rawQuestions as Array<Record<string, unknown>>).map(
+        (q) => ({
+          id: String(q.id ?? q.question_id ?? ""),
+          text: String(
+            (q.body as Record<string, unknown>)?.text ?? q.question_text ?? q.text ?? ""
+          ),
+          type: mapQuestionType(String(q.question_class ?? q.question_type ?? "free_text")),
+          options: extractOptions(q.response_options ?? q.options),
+          required: Boolean(q.is_required ?? true),
+        })
+      );
+
+      if (questions.length > 0) {
+        return {
+          id: String(node.id ?? fallbackId),
+          title: String(node.name ?? node.title ?? "Survey"),
+          description: String(node.description ?? ""),
+          points_reward: Number(node.reward_amount ?? 0),
+          questions,
+          estimated_time_minutes: Number(node.estimated_time ?? 5),
+        };
+      }
+    }
+
+    // Recurse
+    const nested = extractSurveyDetail(val, fallbackId);
+    if (nested) return nested;
+  }
+  return null;
+}
+
+function extractSurveyDetailFromHTML(
+  html: string,
+  fallbackId: string
+): SurveyDetail | null {
+  const jsonMatches = html.matchAll(
+    /data-sjs>\s*(\{.*?"require".*?\})\s*<\/script/g
+  );
+  for (const match of jsonMatches) {
+    try {
+      const data = JSON.parse(match[1]);
+      const detail = extractSurveyDetail(data, fallbackId);
+      if (detail) return detail;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+function extractOptions(
+  raw: unknown
+): Array<{ id: string; text: string }> | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  return raw.map((o: Record<string, unknown>) => ({
+    id: String(o.option_value ?? o.id ?? ""),
+    text: String(
+      (o.option_text as Record<string, unknown>)?.text ?? o.text ?? o.option_text ?? ""
+    ),
+  }));
+}
+
+function extractSubmitResult(obj: unknown): SubmitResult {
+  if (!obj || typeof obj !== "object") {
+    return { success: true, points_earned: 0, total_points: 0, message: "Submitted" };
+  }
+  const record = obj as Record<string, unknown>;
+  // Search for success/points fields
+  for (const val of Object.values(record)) {
+    if (typeof val === "object" && val !== null) {
+      const node = val as Record<string, unknown>;
+      if ("success" in node || "points_earned" in node) {
+        return {
+          success: Boolean(node.success ?? true),
+          points_earned: Number(node.points_earned ?? 0),
+          total_points: Number(node.total_points ?? 0),
+          message: String(node.message ?? "Submitted"),
+        };
+      }
+    }
+  }
+  return { success: true, points_earned: 0, total_points: 0, message: "Submitted" };
 }
 
 function mapStatus(

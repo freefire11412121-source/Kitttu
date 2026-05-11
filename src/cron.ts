@@ -2,19 +2,19 @@ import cron from "node-cron";
 import { SURVEY_CHECK_INTERVAL, DAILY_REPORT_SCHEDULE } from "./config.js";
 import { ViewpointsClient } from "./api.js";
 import { runSurveyCycle } from "./survey.js";
-import { getToken, getStats } from "./store.js";
+import { getCookies, getStats } from "./store.js";
 
 export function startCronJobs(notify: (msg: string) => void): void {
   // Every 4 hours: check for new surveys and auto-complete
   cron.schedule(SURVEY_CHECK_INTERVAL, async () => {
-    const token = getToken();
-    if (!token) {
-      notify("Skipping scheduled check — no token set. Use /set_token");
+    const cookies = getCookies();
+    if (!cookies) {
+      notify("Skipping scheduled check — no cookies set. Use /set_cookies");
       return;
     }
 
     notify("Checking for new surveys...");
-    const client = new ViewpointsClient(token);
+    const client = new ViewpointsClient(cookies);
 
     try {
       const results = await runSurveyCycle(client);
@@ -41,8 +41,8 @@ export function startCronJobs(notify: (msg: string) => void): void {
       notify(msg);
     } catch (e) {
       const errMsg = e instanceof Error ? e.message : String(e);
-      if (errMsg.includes("invalid") || errMsg.includes("expired")) {
-        notify("Token expired! Get a new token and use /set_token");
+      if (errMsg.includes("expired") || errMsg.includes("DTSG")) {
+        notify("Session expired! Get new cookies and use /set_cookies");
       } else {
         notify(`Survey check error: ${errMsg.slice(0, 200)}`);
       }
